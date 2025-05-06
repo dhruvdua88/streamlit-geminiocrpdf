@@ -6,3 +6,5 @@ openpyxl
 pydantic 
 google-generativeai
 google
+pip install google-genai
+
