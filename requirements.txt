@@ -1,2 +1,7 @@
 pydantic
 google-generativeai
+streamlit 
+pandas 
+openpyxl 
+pydantic 
+google-generativeai
