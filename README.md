@@ -40,7 +40,7 @@ This Streamlit application allows users to upload PDF invoices and extract struc
     pandas
     openpyxl
     pydantic
-    google-generativeai
+    google-genai
     ```
     Then install them:
     ```bash
@@ -88,7 +88,7 @@ This Streamlit application allows users to upload PDF invoices and extract struc
 *   **Streamlit:** For the web application interface.
 *   **Python:** Core programming language.
 *   **Google Gemini API:** For the AI-powered data extraction.
-    *   `google-generativeai` library: Python SDK for Gemini.
+    *   `google-genai` library: The official Google Generative AI SDK for Python.
 *   **Pydantic:** For data validation and schema definition.
 *   **Pandas:** For data manipulation and creating the Excel output.
 *   **Openpyxl:** For writing to Excel files.

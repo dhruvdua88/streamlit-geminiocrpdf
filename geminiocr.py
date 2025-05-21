@@ -5,12 +5,14 @@ import pandas as pd
 import os
 import tempfile # For temporary file handling
 import io # For Excel download
+from google.genai import types # Added for the new SDK
+import asyncio # Added for asynchronous processing
 
-# Try to import google.generativeai, show error if not found
+# Try to import google.genai, show error if not found
 try:
     from google import genai
 except ImportError:
-    st.error("The 'google-generativeai' library is not installed. Please install it by running: pip install google-generativeai")
+    st.error("The 'google-genai' library is not installed. Please install it by running: pip install google-genai") # Ensured this is correct
     st.stop()
 
 # --- Pydantic Models (as provided) ---
@@ -35,29 +37,27 @@ class Invoice(BaseModel):
     expense_ledger: Optional[str] = None
     tds: Optional[str] = None
 
-# --- Gemini API Interaction Function ---
-# This function is adapted from your script
-# It assumes 'client_instance' has 'files.upload' and 'models.generate_content' methods
-def extract_structured_data(
+# --- Gemini API Interaction Function (Async) ---
+async def extract_structured_data(
     client_instance, # The genai.Client object
     gemini_model_id: str,
-    file_path: str,
-    pydantic_schema: BaseModel,
+    file_content: bytes, 
+    original_filename: str, 
+    pydantic_schema: BaseModel, 
 ):
-    display_name = os.path.basename(file_path)
-    gemini_file_resource = None # To store the Gemini File API object for deletion
+    temp_file_path = None
+    gemini_file_resource = None 
 
     try:
-        # 1. Upload the file to the File API
-        st.write(f"Uploading '{display_name}' to Gemini File API...")
-        # This uses the client.files.upload structure from your script
-        gemini_file_resource = client_instance.files.upload(
-            file=file_path,
-            config={'display_name': display_name.split('.')[0]}
-        )
-        st.write(f"'{display_name}' uploaded. Gemini file name: {gemini_file_resource.name}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(original_filename)[1]) as tmp:
+            tmp.write(file_content)
+            temp_file_path = tmp.name
+        
+        # Verbose st.write calls removed as per subtask
+        # st.write(f"Uploading '{original_filename}' (temp: {temp_file_path}) to Gemini File API...") 
+        gemini_file_resource = await client_instance.aio.files.upload(path=temp_file_path) 
+        # st.write(f"'{original_filename}' uploaded. Gemini file name: {gemini_file_resource.name}")
 
-        # 2. Generate a structured response using the Gemini API
         prompt = (
             "Extract all relevant and clear information from the invoice, adhering to Indian standards "
             "for dates (DD/MM/YYYY or DD-MM-YYYY) and codes (like GSTIN, HSN/SAC). "
@@ -70,36 +70,37 @@ def extract_structured_data(
             "Do not make assumptions or perform calculations beyond what's explicitly stated in the invoice text. "
             "If a value is clearly zero, represent it as 0.0 for floats. For dates, prefer DD/MM/YYYY."
         )
-        st.write(f"Sending '{display_name}' to Gemini model '{gemini_model_id}' for extraction...")
-        # This uses the client.models.generate_content structure from your script
-        response = client_instance.models.generate_content(
+        # st.write(f"Sending '{original_filename}' to Gemini model '{gemini_model_id}' for extraction...")
+        response = await client_instance.aio.models.generate_content( 
             model=gemini_model_id,
-            contents=[prompt, gemini_file_resource],
-            config={'response_mime_type': 'application/json', 'response_schema': pydantic_schema}
+            contents=[prompt, gemini_file_resource], 
+            config=types.GenerateContentConfig(response_mime_type='application/json', response_schema=pydantic_schema)
         )
-
-        st.write(f"Data extracted for '{display_name}'.")
-        # Convert the response to the pydantic model and return it
-        # Your original script uses response.parsed
-        return response.parsed
+        # st.write(f"Data extracted for '{original_filename}'.") # Success is handled in main_processing_async
+        parsed_model = pydantic_schema.model_validate_json(response.text)
+        return parsed_model
 
     except Exception as e:
-        st.error(f"Error processing '{display_name}' with Gemini: {e}")
-        import traceback
-        st.error(traceback.format_exc())
-        return None
+        # This error will be caught by asyncio.gather and handled in main_processing_async
+        # For detailed debugging, it's good to log it here or re-raise
+        # st.error(f"Error processing '{original_filename}' within extract_structured_data: {e}") 
+        # import traceback # Keep traceback for debugging if needed, but don't show in UI here
+        # st.error(traceback.format_exc())
+        raise # Re-raise the exception to be caught by asyncio.gather
     finally:
-        # 3. Clean up: Delete the file from Gemini File API if it was uploaded
-        if gemini_file_resource and hasattr(client_instance, 'files') and hasattr(client_instance.files, 'delete'):
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
+            # st.write(f"Deleted temporary local file: {temp_file_path}") # Removed
+        
+        if gemini_file_resource and hasattr(client_instance.aio, 'files') and hasattr(client_instance.aio.files, 'delete'):
             try:
-                st.write(f"Attempting to delete '{gemini_file_resource.name}' from Gemini File API...")
-                client_instance.files.delete(name=gemini_file_resource.name) # Assumes this method exists
-                st.write(f"Successfully deleted '{gemini_file_resource.name}' from Gemini.")
+                # st.write(f"Attempting to delete '{gemini_file_resource.name}' from Gemini File API...") # Removed
+                await client_instance.aio.files.delete(name=gemini_file_resource.name) 
+                # st.write(f"Successfully deleted '{gemini_file_resource.name}' from Gemini.") # Removed
             except Exception as e_del:
-                st.warning(f"Could not delete '{gemini_file_resource.name}' from Gemini File API: {e_del}")
+                st.warning(f"Could not delete '{gemini_file_resource.name}' from Gemini File API: {e_del}") # Keep this warning
         elif gemini_file_resource:
-            st.warning(f"Could not determine how to delete Gemini file '{gemini_file_resource.name}'. "
-                       "Manual cleanup may be required in your Gemini project console.")
+            st.warning(f"Could not determine how to delete Gemini file '{gemini_file_resource.name}'. Manual cleanup may be required.") # Keep this
 
 
 # --- Streamlit App UI ---
@@ -109,9 +110,6 @@ st.title("📄 PDF Invoice Extractor (Gemini AI)")
 st.sidebar.header("Configuration")
 api_key_input = st.sidebar.text_input("Enter your Gemini API Key:", type="password")
 
-# Use a known good model, but allow override if user is sure about "gemini-2.0-flash"
-# The model "gemini-2.0-flash" from your script might be an internal or non-public model.
-# "gemini-1.5-flash-latest" is a good public alternative for this task.
 DEFAULT_GEMINI_MODEL_ID = "gemini-1.5-flash-latest"
 gemini_model_id_input = st.sidebar.text_input("Gemini Model ID for Extraction:", DEFAULT_GEMINI_MODEL_ID)
 st.sidebar.caption(f"Default is `{DEFAULT_GEMINI_MODEL_ID}`. Your script used 'gemini-2.0-flash'. "
@@ -148,44 +146,48 @@ if st.button("🚀 Process Invoices", type="primary"):
         st.error("Please specify a Gemini Model ID in the sidebar.")
     else:
         try:
-            # Initialize client here, as API key might change or processing is requested
             st.session_state.client = genai.Client(api_key=api_key_input)
-            st.success("Gemini client initialized successfully with the provided API Key.")
+            st.success("Gemini client initialized successfully.")
         except Exception as e:
             st.error(f"Failed to initialize Gemini client: {e}")
-            st.session_state.client = None # Reset client on failure
+            st.session_state.client = None
 
         if st.session_state.client:
-            st.session_state.summary_rows = [] # Clear previous results
+            st.session_state.summary_rows = [] 
             progress_bar = st.progress(0)
             total_files = len(uploaded_files)
 
-            for i, uploaded_file_obj in enumerate(uploaded_files):
-                st.markdown(f"---")
-                st.info(f"Processing file: {uploaded_file_obj.name} ({i+1}/{total_files})")
-                temp_file_path = None
-                try:
-                    # Save UploadedFile to a temporary file to get a file_path
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file_obj.name)[1]) as tmp:
-                        tmp.write(uploaded_file_obj.getvalue())
-                        temp_file_path = tmp.name
+            async def main_processing_async():
+                tasks = []
+                for uploaded_file_obj in uploaded_files:
+                    tasks.append(extract_structured_data(
+                        client_instance=st.session_state.client,
+                        gemini_model_id=gemini_model_id_input,
+                        file_content=uploaded_file_obj.getvalue(), 
+                        original_filename=uploaded_file_obj.name,    
+                        pydantic_schema=Invoice                     
+                    ))
+                
+                with st.spinner(f"Processing {total_files} invoice(s) concurrently... Please wait."):
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    with st.spinner(f"Extracting data from {uploaded_file_obj.name}..."):
-                        extracted_data = extract_structured_data(
-                            client_instance=st.session_state.client,
-                            gemini_model_id=gemini_model_id_input,
-                            file_path=temp_file_path,
-                            pydantic_schema=Invoice # The Pydantic model for structuring output
-                        )
+                successful_extractions = 0
+                for i, result_or_exc in enumerate(results):
+                    current_file_name = uploaded_files[i].name
+                    st.markdown(f"---") # Separator for each file's result
 
-                    if extracted_data:
-                        st.success(f"Successfully extracted data from {uploaded_file_obj.name}")
+                    if isinstance(result_or_exc, Exception):
+                        st.error(f"⚠️ Error processing **{current_file_name}**: {result_or_exc}")
+                    elif result_or_exc:
+                        extracted_data = result_or_exc
+                        st.success(f"✅ Successfully extracted data from **{current_file_name}**.")
+                        successful_extractions +=1
+                        
                         cgst = extracted_data.cgst if extracted_data.cgst is not None else 0.0
                         sgst = extracted_data.sgst if extracted_data.sgst is not None else 0.0
                         igst = extracted_data.igst if extracted_data.igst is not None else 0.0
                         pos = extracted_data.place_of_supply if extracted_data.place_of_supply else "N/A"
                         buyer_gstin_display = extracted_data.buyer_gstin or "N/A"
-
                         narration = (
                             f"Invoice {extracted_data.invoice_number} dated {extracted_data.date} "
                             f"was issued by {extracted_data.seller_name} (GSTIN: {extracted_data.gstin}) "
@@ -196,8 +198,7 @@ if st.button("🚀 Process Invoices", type="primary"):
                             f"TDS: {extracted_data.tds or 'N/A'}."
                         )
                         st.session_state.summary_rows.append({
-                            "File Name": uploaded_file_obj.name,
-                            # "File Path": temp_file_path, # Temp path might not be useful long term
+                            "File Name": current_file_name, 
                             "Invoice Number": extracted_data.invoice_number,
                             "Date": extracted_data.date,
                             "Seller Name": extracted_data.seller_name,
@@ -214,20 +215,28 @@ if st.button("🚀 Process Invoices", type="primary"):
                             "Narration": narration,
                         })
                     else:
-                        st.warning(f"Failed to extract data or no data returned for {uploaded_file_obj.name}")
+                        # This case handles when extract_structured_data returned None (e.g. if it caught an error and didn't re-raise)
+                        # However, the current extract_structured_data re-raises exceptions.
+                        # This block would be relevant if extract_structured_data returned None on some non-exceptional failures.
+                        st.warning(f"⚠️ No data was extracted from **{current_file_name}**. The function returned None.")
+                    
+                    progress_bar.progress((i + 1) / total_files)
 
-                except Exception as e_outer:
-                    st.error(f"An unexpected error occurred while processing {uploaded_file_obj.name}: {e_outer}")
-                finally:
-                    # Clean up: Delete the temporary local file
-                    if temp_file_path and os.path.exists(temp_file_path):
-                        os.unlink(temp_file_path)
-                        st.write(f"Deleted temporary local file: {temp_file_path}")
-                progress_bar.progress((i + 1) / total_files)
+                st.markdown(f"---")
+                if successful_extractions > 0 and successful_extractions == total_files:
+                    st.success(f"All {total_files} invoices processed successfully!")
+                    st.balloons()
+                elif successful_extractions > 0:
+                    st.info(f"Successfully processed {successful_extractions} out of {total_files} invoices.")
+                    st.balloons() # Still celebrate partial success
+                elif total_files > 0 :
+                    st.warning("Processing complete, but no data was successfully extracted from any file.")
+                else: # Should not happen if button is clicked with uploaded_files
+                    st.info("No files were processed.")
 
-            st.markdown(f"---")
-            if st.session_state.summary_rows:
-                st.balloons()
+
+            asyncio.run(main_processing_async())
+            progress_bar.progress(1.0) # Ensure progress bar completes
 
 
 if st.session_state.summary_rows:
@@ -235,7 +244,6 @@ if st.session_state.summary_rows:
     df = pd.DataFrame(st.session_state.summary_rows)
     st.dataframe(df)
 
-    # Provide download link for Excel
     output_excel = io.BytesIO()
     with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='InvoiceSummary')
@@ -247,5 +255,8 @@ if st.session_state.summary_rows:
         file_name="invoice_summary.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-elif not uploaded_files:
+elif not uploaded_files and st.session_state.get('client') is not None : # Check if processing was attempted
+    # This message appears if processing happened but summary_rows is empty
+    st.info("No data was extracted from the processed files, or no files were uploaded for processing.")
+elif not uploaded_files: # Initial state before any processing
      st.info("Upload PDF files and click 'Process Invoices' to see results.")
