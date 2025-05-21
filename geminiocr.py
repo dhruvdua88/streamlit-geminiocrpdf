@@ -55,7 +55,7 @@ async def extract_structured_data(
         
         # Verbose st.write calls removed as per subtask
         # st.write(f"Uploading '{original_filename}' (temp: {temp_file_path}) to Gemini File API...") 
-        gemini_file_resource = await client_instance.aio.files.upload(path=temp_file_path) 
+        gemini_file_resource = await client_instance.aio.files.upload(file=temp_file_path) 
         # st.write(f"'{original_filename}' uploaded. Gemini file name: {gemini_file_resource.name}")
 
         prompt = (
